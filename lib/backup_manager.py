@@ -131,27 +131,27 @@ class BackupManager:
     # -------------------------------------------------------------
     # MySQL / MariaDB Backup and Restore
     # -------------------------------------------------------------
-    def _create_mysql_backup(self):
+    def _create_mysql_backup(self, extra_tables=None):
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         v_bak = "videoversion_bak_{}".format(ts)
         vt_bak = "videoversiontype_bak_{}".format(ts)
-        s_bak = "seasons_bak_{}".format(ts)
         tables = self.adapter.get_tables()
 
-        log("Creating MySQL/MariaDB backup tables: {}, {}, {}".format(v_bak, vt_bak, s_bak))
-        # Clone structure and copy data safely
-        self.adapter.execute("CREATE TABLE IF NOT EXISTS `{}` LIKE `videoversion`;".format(v_bak))
-        self.adapter.execute("INSERT INTO `{}` SELECT * FROM `videoversion`;".format(v_bak))
-
-        self.adapter.execute("CREATE TABLE IF NOT EXISTS `{}` LIKE `videoversiontype`;".format(vt_bak))
-        self.adapter.execute("INSERT INTO `{}` SELECT * FROM `videoversiontype`;".format(vt_bak))
-
-        backed_tables = [v_bak, vt_bak]
+        base_tables = ["videoversion", "videoversiontype"]
         if "seasons" in tables:
-            self.adapter.execute("CREATE TABLE IF NOT EXISTS `{}` LIKE `seasons`;".format(s_bak))
-            self.adapter.execute("INSERT INTO `{}` SELECT * FROM `seasons`;".format(s_bak))
-            backed_tables.append(s_bak)
+            base_tables.append("seasons")
+        for et in (extra_tables or []):
+            if et in tables and et not in base_tables:
+                base_tables.append(et)
 
+        backed_tables = []
+        for tbl in base_tables:
+            bak_tbl = "{}_bak_{}".format(tbl, ts)
+            self.adapter.execute("CREATE TABLE IF NOT EXISTS `{}` LIKE `{}`;".format(bak_tbl, tbl))
+            self.adapter.execute("INSERT INTO `{}` SELECT * FROM `{}`;".format(bak_tbl, tbl))
+            backed_tables.append(bak_tbl)
+
+        log("Creating MySQL/MariaDB backup tables: {}".format(", ".join(backed_tables)))
         self.adapter.commit()
         self._prune_mysql_backups()
 
@@ -232,10 +232,12 @@ class BackupManager:
             self.adapter.execute("DELETE FROM `videoversiontype`;")
             self.adapter.execute("INSERT INTO `videoversiontype` SELECT * FROM `{}`;".format(vt_bak))
 
-        # Clear and restore seasons if snapshot exists
-        if s_bak in tables and "seasons" in tables:
-            self.adapter.execute("DELETE FROM `seasons`;")
-            self.adapter.execute("INSERT INTO `seasons` SELECT * FROM `{}`;".format(s_bak))
+        # Clear and restore any additional metadata snapshots (seasons, movie, tvshow, episode, streamdetails)
+        for extra_tbl in ("seasons", "movie", "tvshow", "episode", "streamdetails"):
+            e_bak = "{}_bak_{}".format(extra_tbl, ts)
+            if e_bak in tables and extra_tbl in tables:
+                self.adapter.execute("DELETE FROM `{}`;".format(extra_tbl))
+                self.adapter.execute("INSERT INTO `{}` SELECT * FROM `{}`;".format(extra_tbl, e_bak))
 
         self.adapter.commit()
         return True
@@ -246,16 +248,12 @@ class BackupManager:
             to_delete = backups[self.retention:]
             for item in to_delete:
                 ts = item.identifier
-                v_tbl = "videoversion_bak_{}".format(ts)
-                vt_tbl = "videoversiontype_bak_{}".format(ts)
-                s_tbl = "seasons_bak_{}".format(ts)
-                log("Pruning old MySQL backup table (retaining min {}): {}, {}".format(
-                    self.retention, v_tbl, vt_tbl
+                log("Pruning old MySQL backup snapshot (retaining min {}): {}".format(
+                    self.retention, ts
                 ))
                 try:
-                    self.adapter.execute("DROP TABLE IF EXISTS `{}`;".format(v_tbl))
-                    self.adapter.execute("DROP TABLE IF EXISTS `{}`;".format(vt_tbl))
-                    self.adapter.execute("DROP TABLE IF EXISTS `{}`;".format(s_tbl))
+                    for tbl in ("videoversion", "videoversiontype", "seasons", "movie", "tvshow", "episode", "streamdetails"):
+                        self.adapter.execute("DROP TABLE IF EXISTS `{}_bak_{}`;".format(tbl, ts))
                     self.adapter.commit()
                 except Exception as e:
                     log("Error dropping old backup tables: {}".format(e), "warning")
@@ -277,12 +275,12 @@ class BackupManager:
     # -------------------------------------------------------------
     # Public Unified Interface
     # -------------------------------------------------------------
-    def create_backup(self):
+    def create_backup(self, extra_tables=None):
         """Creates a backup snapshot. Ensures at least 3 backups are retained."""
         if isinstance(self.adapter, SQLiteAdapter):
             return self._create_sqlite_backup()
         elif isinstance(self.adapter, MySQLAdapter):
-            return self._create_mysql_backup()
+            return self._create_mysql_backup(extra_tables=extra_tables)
         raise ValueError("Unsupported adapter for backup: {}".format(type(self.adapter)))
 
     def list_backups(self):

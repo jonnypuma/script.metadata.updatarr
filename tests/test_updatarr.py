@@ -652,9 +652,12 @@ class TestMissingMetadataUpdater(unittest.TestCase):
         self.adapter = SQLiteAdapter(self.db_path)
         self.adapter.connect()
         self.bak_patcher = patch("lib.backup_manager.translate_path", return_value=os.path.join(self.temp_dir, "backups"))
+        self.meta_patcher = patch("lib.metadata_updater.translate_path", return_value=os.path.join(self.temp_dir, "addon_data"))
         self.bak_patcher.start()
+        self.meta_patcher.start()
 
     def tearDown(self):
+        self.meta_patcher.stop()
         self.bak_patcher.stop()
         self.adapter.close()
         shutil.rmtree(self.temp_dir)
@@ -719,6 +722,10 @@ class TestMissingMetadataUpdater(unittest.TestCase):
         self.assertEqual(len(ep_sd), 2)   # video + audio
         mov_cast = self.adapter.query("SELECT * FROM actor_link WHERE media_id = 50 AND media_type = 'movie'")
         self.assertEqual(len(mov_cast), 1)
+
+        # Verify IMDB -> TMDB fallback helper
+        with patch.object(updater.tmdb, "_request_json", return_value={"movie_results": [{"id": 348}]}):
+            self.assertEqual(updater.tmdb.resolve_tmdb_id_from_imdb("tt0078748", "movie"), "348")
 
 
 if __name__ == "__main__":

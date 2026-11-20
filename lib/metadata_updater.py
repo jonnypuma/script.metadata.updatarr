@@ -13,9 +13,11 @@ Priority: Local .nfo files -> TMDbHelper / TMDB API fallback.
 import os
 import re
 import html
+import json
+import threading
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from lib.kodi_compat import log, file_exists, read_text_file
+from lib.kodi_compat import log, file_exists, read_text_file, list_dir, translate_path, make_dirs
 from lib.backup_manager import BackupManager
 from lib.tmdbhelper_client import TMDbFallbackClient
 
@@ -224,51 +226,73 @@ class MetadataUpdater:
             language=getattr(settings, "tmdb_language", "en-US")
         )
         self._tvshow_nfo_cache = {}
+        self._folder_nfo_cache = {}
+        self._cache_lock = threading.Lock()
+
+    def _get_folder_nfo_map(self, base_folder):
+        """Cache .nfo files in a folder via a single list_dir() call to avoid per-file SMB stat calls."""
+        with self._cache_lock:
+            if base_folder in self._folder_nfo_cache:
+                return self._folder_nfo_cache[base_folder]
+
+        nfo_map = None
+        try:
+            _, files = list_dir(base_folder)
+            if files is not None:
+                nfo_map = {f.lower(): f for f in files if f.lower().endswith(".nfo")}
+        except Exception:
+            nfo_map = None
+
+        with self._cache_lock:
+            if base_folder not in self._folder_nfo_cache:
+                self._folder_nfo_cache[base_folder] = nfo_map
+            return self._folder_nfo_cache[base_folder]
+
+    def _read_nfo_in_folder(self, base_folder, candidate_names):
+        base = base_folder.rstrip("/\\") + "/"
+        nfo_map = self._get_folder_nfo_map(base)
+        for fname in candidate_names:
+            actual = nfo_map.get(fname.lower()) if nfo_map is not None else fname
+            if nfo_map is not None and not actual:
+                continue
+            full_path = base + actual
+            try:
+                if nfo_map is not None or file_exists(full_path):
+                    return _parse_nfo_fields(read_text_file(full_path))
+            except Exception:
+                pass
+        return _parse_nfo_fields("")
 
     def _read_tvshow_nfo(self, show_path):
         if not show_path:
             return _parse_nfo_fields("")
         base = show_path.rstrip("/\\") + "/"
-        if base in self._tvshow_nfo_cache:
-            return self._tvshow_nfo_cache[base]
-        nfo_path = base + "tvshow.nfo"
-        parsed = _parse_nfo_fields("")
-        try:
-            if file_exists(nfo_path):
-                parsed = _parse_nfo_fields(read_text_file(nfo_path))
-        except Exception:
-            pass
-        self._tvshow_nfo_cache[base] = parsed
+        with self._cache_lock:
+            if base in self._tvshow_nfo_cache:
+                return self._tvshow_nfo_cache[base]
+        parsed = self._read_nfo_in_folder(base, ["tvshow.nfo"])
+        with self._cache_lock:
+            self._tvshow_nfo_cache[base] = parsed
         return parsed
 
     def _read_season_nfo(self, show_path, season_num):
         if not show_path:
             return _parse_nfo_fields("")
-        base = show_path.rstrip("/\\") + "/"
         candidates = (
             ["season-specials.nfo", "season00.nfo"]
             if season_num == 0
             else ["season{:02d}.nfo".format(season_num), "season{}.nfo".format(season_num)]
         )
-        for fname in candidates:
-            p = base + fname
-            try:
-                if file_exists(p):
-                    data = _parse_nfo_fields(read_text_file(p))
-                    if data["plot"] or data["title"]:
-                        return data
-            except Exception:
-                pass
-        return _parse_nfo_fields("")
+        return self._read_nfo_in_folder(show_path, candidates)
 
-    def _read_first_nfo(self, nfo_paths):
-        for p in nfo_paths:
-            try:
-                if file_exists(p):
-                    return _parse_nfo_fields(read_text_file(p))
-            except Exception:
-                pass
-        return _parse_nfo_fields("")
+    def _resolve_tmdb_id(self, tmdb_id, imdb_id, media_type):
+        tid = (tmdb_id or "").strip()
+        if tid:
+            return tid
+        iid = (imdb_id or "").strip()
+        if iid and self.tmdb.is_available():
+            return self.tmdb.resolve_tmdb_id_from_imdb(iid, media_type=media_type)
+        return ""
 
     # ------------------------------------------------------------------
     # Query helpers
@@ -287,14 +311,15 @@ class MetadataUpdater:
         sql = """
         SELECT
             s.idSeason, s.idShow, s.season, s.name AS cur_name, s.plot AS cur_plot,
-            t.c00 AS show_title, u.value AS tmdb_id, MIN(p.strPath) AS show_path
+            t.c00 AS show_title, u.value AS tmdb_id, ui.value AS imdb_id, MIN(p.strPath) AS show_path
         FROM seasons s
         JOIN tvshow t ON s.idShow = t.idShow
         LEFT JOIN uniqueid u ON u.media_id = t.idShow AND u.media_type = 'tvshow' AND u.type = 'tmdb'
+        LEFT JOIN uniqueid ui ON ui.media_id = t.idShow AND ui.media_type = 'tvshow' AND ui.type = 'imdb'
         LEFT JOIN tvshowlinkpath tlp ON tlp.idShow = t.idShow
         LEFT JOIN path p ON tlp.idPath = p.idPath
         WHERE s.season >= %s {where_missing}
-        GROUP BY s.idSeason, s.idShow, s.season, s.name, s.plot, t.c00, u.value
+        GROUP BY s.idSeason, s.idShow, s.season, s.name, s.plot, t.c00, u.value, ui.value
         ORDER BY t.c00 ASC, s.season ASC
         """.format(where_missing=where_missing)
         try:
@@ -303,10 +328,11 @@ class MetadataUpdater:
             sql_simple = """
             SELECT
                 s.idSeason, s.idShow, s.season, s.name AS cur_name, s.plot AS cur_plot,
-                t.c00 AS show_title, u.value AS tmdb_id, '' AS show_path
+                t.c00 AS show_title, u.value AS tmdb_id, ui.value AS imdb_id, '' AS show_path
             FROM seasons s
             JOIN tvshow t ON s.idShow = t.idShow
             LEFT JOIN uniqueid u ON u.media_id = t.idShow AND u.media_type = 'tvshow' AND u.type = 'tmdb'
+            LEFT JOIN uniqueid ui ON ui.media_id = t.idShow AND ui.media_type = 'tvshow' AND ui.type = 'imdb'
             WHERE s.season >= %s {where_missing}
             ORDER BY t.c00 ASC, s.season ASC
             """.format(where_missing=where_missing)
@@ -329,12 +355,13 @@ class MetadataUpdater:
             m.idMovie, m.idFile, m.c00 AS title,
             m.c01 AS cur_plot, m.c03 AS cur_tagline, m.c11 AS cur_runtime,
             m.c12 AS cur_mpaa, m.c14 AS cur_genres, m.c18 AS cur_studios,
-            f.strFilename, p.strPath, u.value AS tmdb_id,
+            f.strFilename, p.strPath, u.value AS tmdb_id, ui.value AS imdb_id,
             {sd_sel} AS has_sd, {al_sel} AS has_al
         FROM movie m
         JOIN files f ON m.idFile = f.idFile
         JOIN path p ON f.idPath = p.idPath
         LEFT JOIN uniqueid u ON u.media_id = m.idMovie AND u.media_type = 'movie' AND u.type = 'tmdb'
+        LEFT JOIN uniqueid ui ON ui.media_id = m.idMovie AND ui.media_type = 'movie' AND ui.type = 'imdb'
         {sd_join}
         {al_join}
         WHERE (
@@ -365,10 +392,11 @@ class MetadataUpdater:
         SELECT
             t.idShow, t.c00 AS title,
             t.c01 AS cur_plot, t.c08 AS cur_genres, t.c13 AS cur_mpaa, t.c14 AS cur_studios,
-            u.value AS tmdb_id, MIN(p.strPath) AS show_path,
+            u.value AS tmdb_id, ui.value AS imdb_id, MIN(p.strPath) AS show_path,
             {al_sel} AS has_al
         FROM tvshow t
         LEFT JOIN uniqueid u ON u.media_id = t.idShow AND u.media_type = 'tvshow' AND u.type = 'tmdb'
+        LEFT JOIN uniqueid ui ON ui.media_id = t.idShow AND ui.media_type = 'tvshow' AND ui.type = 'imdb'
         LEFT JOIN tvshowlinkpath tlp ON tlp.idShow = t.idShow
         LEFT JOIN path p ON tlp.idPath = p.idPath
         {al_join}
@@ -379,7 +407,7 @@ class MetadataUpdater:
             OR t.c14 IS NULL OR TRIM(t.c14) = ''
             {extra_sql}
         )
-        GROUP BY t.idShow, t.c00, t.c01, t.c08, t.c13, t.c14, u.value {al_grp}
+        GROUP BY t.idShow, t.c00, t.c01, t.c08, t.c13, t.c14, u.value, ui.value {al_grp}
         ORDER BY t.c00 ASC
         """.format(
             al_sel="CASE WHEN al.media_id IS NOT NULL THEN 1 ELSE 0 END" if has_al else "1",
@@ -398,13 +426,14 @@ class MetadataUpdater:
         SELECT
             e.idEpisode, e.idFile, e.idShow, e.c00 AS ep_title, e.c01 AS cur_plot, e.c09 AS cur_runtime,
             e.c12 AS season_num, e.c13 AS episode_num,
-            t.c00 AS show_title, f.strFilename, p.strPath, u.value AS show_tmdb_id,
+            t.c00 AS show_title, f.strFilename, p.strPath, u.value AS show_tmdb_id, ui.value AS show_imdb_id,
             {sd_sel} AS has_sd
         FROM episode e
         JOIN tvshow t ON e.idShow = t.idShow
         JOIN files f ON e.idFile = f.idFile
         JOIN path p ON f.idPath = p.idPath
         LEFT JOIN uniqueid u ON u.media_id = t.idShow AND u.media_type = 'tvshow' AND u.type = 'tmdb'
+        LEFT JOIN uniqueid ui ON ui.media_id = t.idShow AND ui.media_type = 'tvshow' AND ui.type = 'imdb'
         {sd_join}
         WHERE (
             e.c01 IS NULL OR TRIM(e.c01) = ''
@@ -452,18 +481,20 @@ class MetadataUpdater:
             if new_plot or new_name:
                 sources.append("NFO")
 
-        if getattr(self.settings, "season_scan_tmdb", True) and tmdb_id:
+        if getattr(self.settings, "season_scan_tmdb", True):
             still_plot = need_plot and not new_plot
             still_name = need_name and not new_name
             if (still_plot or still_name) and self.tmdb.is_available():
-                td = self.tmdb.get_season_details(tmdb_id, season_num)
-                if td:
-                    if still_plot and td.get("plot"):
-                        new_plot = td["plot"]
-                    if still_name and td.get("name"):
-                        new_name = td["name"]
-                    if new_plot or new_name:
-                        sources.append("TMDbHelper")
+                resolved_tmdb = self._resolve_tmdb_id(tmdb_id, row.get("imdb_id"), "tvshow")
+                if resolved_tmdb:
+                    td = self.tmdb.get_season_details(resolved_tmdb, season_num)
+                    if td:
+                        if still_plot and td.get("plot"):
+                            new_plot = td["plot"]
+                        if still_name and td.get("name"):
+                            new_name = td["name"]
+                        if new_plot or new_name:
+                            sources.append("TMDbHelper")
 
         fields = {}
         if need_plot and new_plot and new_plot != cur_plot:
@@ -504,7 +535,7 @@ class MetadataUpdater:
         sources = []
         if getattr(self.settings, "season_scan_nfo", True) and path:
             base_name = os.path.splitext(fname)[0]
-            nfo_data = self._read_first_nfo([path + base_name + ".nfo", path + "movie.nfo"])
+            nfo_data = self._read_nfo_in_folder(path, [base_name + ".nfo", "movie.nfo"])
 
         fields = {}
         genres, studios, cast, streams = [], [], [], []
@@ -540,8 +571,9 @@ class MetadataUpdater:
             or (need_studios and not studios)
             or (need_cast and not cast)
         )
-        if still_needs_tmdb and getattr(self.settings, "season_scan_tmdb", True) and tmdb_id and self.tmdb.is_available():
-            td = self.tmdb.get_movie_details(tmdb_id)
+        if still_needs_tmdb and getattr(self.settings, "season_scan_tmdb", True) and self.tmdb.is_available():
+            resolved_tmdb = self._resolve_tmdb_id(tmdb_id, row.get("imdb_id"), "movie")
+            td = self.tmdb.get_movie_details(resolved_tmdb) if resolved_tmdb else None
             if td:
                 added_tmdb = False
                 if need_plot and "c01" not in fields and td.get("plot"):
@@ -624,8 +656,9 @@ class MetadataUpdater:
             or (need_studios and not studios)
             or (need_cast and not cast)
         )
-        if still_needs_tmdb and getattr(self.settings, "season_scan_tmdb", True) and tmdb_id and self.tmdb.is_available():
-            td = self.tmdb.get_tvshow_details(tmdb_id)
+        if still_needs_tmdb and getattr(self.settings, "season_scan_tmdb", True) and self.tmdb.is_available():
+            resolved_tmdb = self._resolve_tmdb_id(tmdb_id, row.get("imdb_id"), "tvshow")
+            td = self.tmdb.get_tvshow_details(resolved_tmdb) if resolved_tmdb else None
             if td:
                 added = False
                 if need_plot and "c01" not in fields and td.get("plot"):
@@ -681,7 +714,7 @@ class MetadataUpdater:
         nfo_data = _parse_nfo_fields("")
         if getattr(self.settings, "season_scan_nfo", True) and path and fname:
             base_name = os.path.splitext(fname)[0]
-            nfo_data = self._read_first_nfo([path + base_name + ".nfo"])
+            nfo_data = self._read_nfo_in_folder(path, [base_name + ".nfo"])
 
         fields, streams, sources = {}, [], []
         if need_plot and nfo_data["plot"]:
@@ -694,8 +727,9 @@ class MetadataUpdater:
             sources.append("NFO")
 
         if ((need_plot and "c01" not in fields) or (need_runtime and "c09" not in fields)) \
-                and getattr(self.settings, "season_scan_tmdb", True) and tmdb_id and s_num >= 0 and e_num >= 0 and self.tmdb.is_available():
-            td = self.tmdb.get_episode_details(tmdb_id, s_num, e_num)
+                and getattr(self.settings, "season_scan_tmdb", True) and s_num >= 0 and e_num >= 0 and self.tmdb.is_available():
+            resolved_tmdb = self._resolve_tmdb_id(tmdb_id, row.get("show_imdb_id"), "tvshow")
+            td = self.tmdb.get_episode_details(resolved_tmdb, s_num, e_num) if resolved_tmdb else None
             if td:
                 added = False
                 if need_plot and "c01" not in fields and td.get("plot"):
@@ -728,43 +762,100 @@ class MetadataUpdater:
     # ------------------------------------------------------------------
     # Orchestration
     # ------------------------------------------------------------------
+    def _get_meta_state_path(self):
+        addon_data = translate_path("special://profile/addon_data/script.metadata.updatarr/")
+        return os.path.join(addon_data, "metadata_scan_state.json")
+
+    def _load_meta_scanned_keys(self, db_key):
+        path = self._get_meta_state_path()
+        if not os.path.exists(path):
+            return set()
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return set(data.get(db_key, []))
+        except Exception:
+            return set()
+
+    def _save_meta_scanned_keys(self, db_key, keys_set):
+        path = self._get_meta_state_path()
+        try:
+            make_dirs(os.path.dirname(path))
+            data = {}
+            if os.path.exists(path):
+                try:
+                    with open(path, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                except Exception:
+                    data = {}
+            data[db_key] = sorted(keys_set)
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f)
+        except Exception as e:
+            log("Could not save metadata_scan_state.json: {}".format(e), "debug")
+
+    def _work_item_key(self, kind, row):
+        if kind == "season":
+            return "season:{}".format(row["idSeason"])
+        if kind == "movie":
+            return "movie:{}".format(row["idMovie"])
+        if kind == "tvshow":
+            return "tvshow:{}".format(row["idShow"])
+        return "episode:{}".format(row["idEpisode"])
+
     def scan_missing_metadata(
         self,
         progress_callback=None,
         include_seasons=True,
         include_movies=True,
         include_tvshows=True,
-        include_episodes=True
+        include_episodes=True,
+        force_full=False
     ):
         """Scan for missing season, movie, TV show, and episode metadata + streamdetails."""
-        self._tvshow_nfo_cache.clear()
+        with self._cache_lock:
+            self._tvshow_nfo_cache.clear()
+            self._folder_nfo_cache.clear()
+
         tables = self._get_table_set()
-        work = []
+        raw_work = []
 
         if include_seasons and "seasons" in tables:
             for r in self._fetch_seasons_needing_metadata():
-                work.append(("season", r))
+                raw_work.append(("season", r))
 
         if include_tvshows and "tvshow" in tables:
             try:
                 for r in self._fetch_tvshows_missing_metadata(tables):
-                    work.append(("tvshow", r))
+                    raw_work.append(("tvshow", r))
             except Exception as e:
                 log("TV show metadata query note: {}".format(e), "debug")
 
         if include_movies and "movie" in tables:
             try:
                 for r in self._fetch_movies_missing_metadata(tables):
-                    work.append(("movie", r))
+                    raw_work.append(("movie", r))
             except Exception as e:
                 log("Movie metadata query note: {}".format(e), "debug")
 
         if include_episodes and "episode" in tables:
             try:
                 for r in self._fetch_episodes_missing_metadata(tables):
-                    work.append(("episode", r))
+                    raw_work.append(("episode", r))
             except Exception as e:
                 log("Episode metadata query note: {}".format(e), "debug")
+
+        db_key = self.adapter.get_display_name() if hasattr(self.adapter, "get_display_name") else "default"
+        use_inc = getattr(self.settings, "incremental_scan", True) and not force_full
+        prev_keys = self._load_meta_scanned_keys(db_key) if use_inc else set()
+
+        if use_inc and prev_keys:
+            work = [(k, r) for (k, r) in raw_work if self._work_item_key(k, r) not in prev_keys]
+            log("Incremental metadata scan: {} new/unscanned of {} candidates (skipped {}).".format(
+                len(work), len(raw_work), len(raw_work) - len(work)
+            ))
+        else:
+            work = raw_work
 
         total = len(work)
         changes = []
@@ -778,6 +869,8 @@ class MetadataUpdater:
             "episode": self._inspect_episode_metadata,
         }
 
+        newly_scanned = set()
+        cancelled = False
         batch_size = 25
         with ThreadPoolExecutor(max_workers=4) as executor:
             processed = 0
@@ -785,7 +878,9 @@ class MetadataUpdater:
                 batch = work[start:start + batch_size]
                 futures = {executor.submit(inspectors[kind], row): (kind, row) for kind, row in batch}
                 for fut in as_completed(futures):
+                    kind, row = futures[fut]
                     processed += 1
+                    newly_scanned.add(self._work_item_key(kind, row))
                     try:
                         ch = fut.result()
                         if ch:
@@ -797,38 +892,58 @@ class MetadataUpdater:
                     _, last_row = batch[-1]
                     lbl = last_row.get("show_title") or last_row.get("title") or last_row.get("ep_title") or ""
                     if progress_callback(processed, total, lbl, len(changes)) is False:
+                        cancelled = True
                         break
+
+        if not cancelled and work:
+            self._save_meta_scanned_keys(db_key, prev_keys | newly_scanned)
 
         if progress_callback:
             progress_callback(total, total, "Metadata scan complete", len(changes))
         return total, changes
 
     def apply_metadata_changes(self, changes, progress_callback=None):
-        """Take a backup and apply MetadataChange updates (including links & streamdetails)."""
+        """Take a full backup of touched tables and apply MetadataChange updates."""
         if not changes:
             return 0, None
 
-        backup_info = self.backup_mgr.create_backup()
+        touched = {ch.target_table for ch in changes}
+        if any(ch.streams for ch in changes):
+            touched.add("streamdetails")
+
+        backup_info = self.backup_mgr.create_backup(extra_tables=sorted(touched))
         tables = self._get_table_set()
 
-        # Preload lookup caches for genre / studio / actor
+        # Preload lookup caches AND existing link sets (avoids thousands of SELECT 1 queries)
         genre_cache = {}
-        if "genre" in tables:
+        existing_genre_links = set()
+        if "genre" in tables and "genre_link" in tables:
             for r in self.adapter.query("SELECT genre_id, name FROM genre"):
                 if r.get("name"):
                     genre_cache[r["name"].strip().lower()] = r["genre_id"]
+            if any(ch.genres for ch in changes):
+                for r in self.adapter.query("SELECT genre_id, media_id, media_type FROM genre_link"):
+                    existing_genre_links.add((r["genre_id"], r["media_id"], r["media_type"]))
 
         studio_cache = {}
-        if "studio" in tables:
+        existing_studio_links = set()
+        if "studio" in tables and "studio_link" in tables:
             for r in self.adapter.query("SELECT studio_id, name FROM studio"):
                 if r.get("name"):
                     studio_cache[r["name"].strip().lower()] = r["studio_id"]
+            if any(ch.studios for ch in changes):
+                for r in self.adapter.query("SELECT studio_id, media_id, media_type FROM studio_link"):
+                    existing_studio_links.add((r["studio_id"], r["media_id"], r["media_type"]))
 
         actor_cache = {}
-        if "actor" in tables:
+        existing_actor_links = set()
+        if "actor" in tables and "actor_link" in tables:
             for r in self.adapter.query("SELECT actor_id, name FROM actor"):
                 if r.get("name"):
                     actor_cache[r["name"].strip().lower()] = r["actor_id"]
+            if any(ch.cast for ch in changes):
+                for r in self.adapter.query("SELECT actor_id, media_id, media_type FROM actor_link"):
+                    existing_actor_links.add((r["actor_id"], r["media_id"], r["media_type"]))
 
         applied = 0
         total = len(changes)
@@ -854,15 +969,13 @@ class MetadataUpdater:
                         if not gid:
                             gid = self.adapter.execute("INSERT INTO genre (name) VALUES (%s)", (gname,))
                             genre_cache[gk] = gid
-                        exists = self.adapter.query(
-                            "SELECT 1 FROM genre_link WHERE genre_id = %s AND media_id = %s AND media_type = %s",
-                            (gid, ch.id_val, ch.media_type)
-                        )
-                        if not exists:
+                        lkey = (gid, ch.id_val, ch.media_type)
+                        if lkey not in existing_genre_links:
                             self.adapter.execute(
                                 "INSERT INTO genre_link (genre_id, media_id, media_type) VALUES (%s, %s, %s)",
-                                (gid, ch.id_val, ch.media_type)
+                                lkey
                             )
+                            existing_genre_links.add(lkey)
 
                 if ch.studios and "studio" in tables and "studio_link" in tables:
                     for sname in ch.studios:
@@ -871,15 +984,13 @@ class MetadataUpdater:
                         if not sid:
                             sid = self.adapter.execute("INSERT INTO studio (name) VALUES (%s)", (sname,))
                             studio_cache[sk] = sid
-                        exists = self.adapter.query(
-                            "SELECT 1 FROM studio_link WHERE studio_id = %s AND media_id = %s AND media_type = %s",
-                            (sid, ch.id_val, ch.media_type)
-                        )
-                        if not exists:
+                        lkey = (sid, ch.id_val, ch.media_type)
+                        if lkey not in existing_studio_links:
                             self.adapter.execute(
                                 "INSERT INTO studio_link (studio_id, media_id, media_type) VALUES (%s, %s, %s)",
-                                (sid, ch.id_val, ch.media_type)
+                                lkey
                             )
+                            existing_studio_links.add(lkey)
 
                 if ch.cast and "actor" in tables and "actor_link" in tables:
                     for act in ch.cast:
@@ -893,15 +1004,13 @@ class MetadataUpdater:
                                 (aname, art_xml)
                             )
                             actor_cache[ak] = aid
-                        exists = self.adapter.query(
-                            "SELECT 1 FROM actor_link WHERE actor_id = %s AND media_id = %s AND media_type = %s",
-                            (aid, ch.id_val, ch.media_type)
-                        )
-                        if not exists:
+                        lkey = (aid, ch.id_val, ch.media_type)
+                        if lkey not in existing_actor_links:
                             self.adapter.execute(
                                 "INSERT INTO actor_link (actor_id, media_id, media_type, role, cast_order) VALUES (%s, %s, %s, %s, %s)",
                                 (aid, ch.id_val, ch.media_type, act.get("role", ""), act.get("order", 0))
                             )
+                            existing_actor_links.add(lkey)
 
                 if ch.streams and ch.id_file and "streamdetails" in tables:
                     for st in ch.streams:

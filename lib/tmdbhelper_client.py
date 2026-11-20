@@ -7,6 +7,7 @@ plugin.video.themoviedb.helper (TMDbHelper) or an optional TMDB API key.
 import json
 import os
 import sys
+import threading
 import time
 import urllib.request
 import urllib.parse
@@ -24,33 +25,37 @@ class TMDbFallbackClient:
         self._tmdbhelper_api = None
         self._tmdbhelper_checked = False
         self._cache = {}
+        self._lock = threading.Lock()
 
     def _init_tmdbhelper(self):
-        if self._tmdbhelper_checked:
+        with self._lock:
+            if self._tmdbhelper_checked:
+                return self._tmdbhelper_api
+            self._tmdbhelper_checked = True
+            try:
+                res_path = translate_path(
+                    "special://home/addons/plugin.video.themoviedb.helper/resources"
+                )
+                if res_path and os.path.isdir(res_path):
+                    if res_path not in sys.path:
+                        sys.path.append(res_path)
+                    from tmdbhelper.lib.api.tmdb.api import TMDb
+                    self._tmdbhelper_api = TMDb()
+                    log("Initialized TMDbHelper fallback API client.")
+            except Exception as e:
+                log("TMDbHelper Python API unavailable ({}); checking API key fallback.".format(e), "debug")
+                self._tmdbhelper_api = None
             return self._tmdbhelper_api
-        self._tmdbhelper_checked = True
-        try:
-            res_path = translate_path(
-                "special://home/addons/plugin.video.themoviedb.helper/resources"
-            )
-            if res_path and os.path.isdir(res_path):
-                if res_path not in sys.path:
-                    sys.path.append(res_path)
-                from tmdbhelper.lib.api.tmdb.api import TMDb
-                self._tmdbhelper_api = TMDb()
-                log("Initialized TMDbHelper fallback API client.")
-        except Exception as e:
-            log("TMDbHelper Python API unavailable ({}); checking API key fallback.".format(e), "debug")
-            self._tmdbhelper_api = None
-        return self._tmdbhelper_api
 
     def is_available(self):
         return bool(self.api_key) or (self._init_tmdbhelper() is not None)
 
     def _request_json(self, endpoint):
-        if endpoint in self._cache:
-            return self._cache[endpoint]
+        with self._lock:
+            if endpoint in self._cache:
+                return self._cache[endpoint]
 
+        data_result = None
         if self.api_key:
             sep = "&" if "?" in endpoint else "?"
             url = "https://api.themoviedb.org/3/{}{}api_key={}&language={}".format(
@@ -63,9 +68,8 @@ class TMDbFallbackClient:
                 try:
                     req = urllib.request.Request(url, headers={"Accept": "application/json"})
                     with urllib.request.urlopen(req, timeout=10) as resp:
-                        data = json.loads(resp.read().decode("utf-8"))
-                        self._cache[endpoint] = data
-                        return data
+                        data_result = json.loads(resp.read().decode("utf-8"))
+                        break
                 except urllib.error.HTTPError as e:
                     if e.code == 429 and attempt == 0:
                         time.sleep(1.5)
@@ -76,24 +80,39 @@ class TMDbFallbackClient:
                     log("TMDB request failed for {}: {}".format(endpoint, e), "debug")
                     break
 
-        tmdb_helper = self._init_tmdbhelper()
-        if tmdb_helper is not None:
-            try:
-                base_ep, _, qs = endpoint.lstrip("/").partition("?")
-                kwargs = {"language": self.language}
-                if qs:
-                    for k, vals in urllib.parse.parse_qs(qs).items():
-                        if vals:
-                            kwargs[k] = vals[0]
-                data = tmdb_helper.get_request_sc(base_ep, **kwargs)
-                if isinstance(data, dict):
-                    self._cache[endpoint] = data
-                    return data
-            except Exception as e:
-                log("TMDbHelper request failed for {}: {}".format(endpoint, e), "debug")
+        if data_result is None:
+            tmdb_helper = self._init_tmdbhelper()
+            if tmdb_helper is not None:
+                try:
+                    base_ep, _, qs = endpoint.lstrip("/").partition("?")
+                    kwargs = {"language": self.language}
+                    if qs:
+                        for k, vals in urllib.parse.parse_qs(qs).items():
+                            if vals:
+                                kwargs[k] = vals[0]
+                    data = tmdb_helper.get_request_sc(base_ep, **kwargs)
+                    if isinstance(data, dict):
+                        data_result = data
+                except Exception as e:
+                    log("TMDbHelper request failed for {}: {}".format(endpoint, e), "debug")
 
-        self._cache[endpoint] = None
-        return None
+        with self._lock:
+            self._cache[endpoint] = data_result
+        return data_result
+
+    def resolve_tmdb_id_from_imdb(self, imdb_id, media_type="movie"):
+        """Resolve a TMDB ID from an IMDB ID (e.g. tt0137523) via /find."""
+        imdb_id = (imdb_id or "").strip()
+        if not imdb_id:
+            return ""
+        data = self._request_json("find/{}?external_source=imdb_id".format(imdb_id))
+        if not isinstance(data, dict):
+            return ""
+        key = "movie_results" if media_type == "movie" else "tv_results"
+        results = data.get(key) or []
+        if results and results[0].get("id"):
+            return str(results[0]["id"])
+        return ""
 
     def _extract_cast(self, credits_dict, limit=15):
         cast_list = []

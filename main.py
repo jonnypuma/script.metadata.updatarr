@@ -603,10 +603,41 @@ def run_view_logs():
         show_ok_dialog("Error", "Could not read log file:\n{}".format(e))
 
 
-def run_missing_metadata_scan(dry_run=False):
+def run_missing_metadata_scan(dry_run=False, scope=None, force_full=False):
     settings = AddonSettings()
+
+    if scope is None:
+        scope_options = [
+            "Seasons Only (Plots & Names - Fast)",
+            "Movies Only (Metadata + Media Info)",
+            "TV Shows Only (Plots, MPAA, Genres, Studios, Cast)",
+            "Episodes Only (Plots, Runtime, Media Info)",
+            "All Missing Metadata (Incremental)",
+            "All Missing Metadata (Full Rescan)"
+        ]
+        s_idx = show_select_dialog(
+            "Select Missing Metadata Scope{}".format(" (Dry Run)" if dry_run else ""),
+            scope_options
+        )
+        if s_idx < 0:
+            return
+        scope_map = {
+            0: ("seasons", False),
+            1: ("movies", False),
+            2: ("tvshows", False),
+            3: ("episodes", False),
+            4: ("all", False),
+            5: ("all", True),
+        }
+        scope, force_full = scope_map[s_idx]
+
+    include_seasons = scope in ("all", "seasons")
+    include_movies = scope in ("all", "movies") and (scope == "movies" or getattr(settings, "update_missing_movie_plots", True))
+    include_tvshows = scope in ("all", "tvshows") and (scope == "tvshows" or getattr(settings, "update_missing_tv_metadata", True))
+    include_episodes = scope in ("all", "episodes") and (scope == "episodes" or getattr(settings, "update_missing_tv_metadata", True))
+
     config = resolve_database_config(settings)
-    log("Resolved DB configuration for missing metadata: {}".format(config))
+    log("Resolved DB configuration for missing metadata (scope={}): {}".format(scope, config))
 
     try:
         adapter = get_adapter_for_config(config)
@@ -620,7 +651,7 @@ def run_missing_metadata_scan(dry_run=False):
     mode_label = "Dry Run: " if dry_run else ""
     progress = ProgressDialog(
         "Metadata Updatarr",
-        "{}Scanning missing metadata in {}...".format(mode_label, db_label)
+        "{}Scanning {} [{}]...".format(mode_label, db_label, scope)
     )
     updater = MetadataUpdater(adapter, settings)
 
@@ -628,7 +659,7 @@ def run_missing_metadata_scan(dry_run=False):
         pct = (float(current) / float(total)) * 100 if total > 0 else 0
         progress.update(
             pct,
-            "{}Metadata {} ({}/{}) | Found: {}".format(mode_label, db_label, current, total, found_count),
+            "{}Metadata [{}] {} ({}/{}) | Found: {}".format(mode_label, scope, db_label, current, total, found_count),
             title
         )
         return not progress.is_canceled()
@@ -636,10 +667,11 @@ def run_missing_metadata_scan(dry_run=False):
     try:
         total_scanned, changes = updater.scan_missing_metadata(
             progress_callback=on_progress,
-            include_seasons=True,
-            include_movies=getattr(settings, "update_missing_movie_plots", True),
-            include_tvshows=getattr(settings, "update_missing_tv_metadata", True),
-            include_episodes=getattr(settings, "update_missing_tv_metadata", True)
+            include_seasons=include_seasons,
+            include_movies=include_movies,
+            include_tvshows=include_tvshows,
+            include_episodes=include_episodes,
+            force_full=force_full
         )
     finally:
         progress.close()
@@ -726,7 +758,7 @@ def run_missing_metadata_scan(dry_run=False):
 
 def run_all_updatarr():
     run_scan_and_update(dry_run=False, force_full=False)
-    run_missing_metadata_scan(dry_run=False)
+    run_missing_metadata_scan(dry_run=False, scope="all", force_full=False)
 
 
 def open_settings():
