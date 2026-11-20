@@ -727,6 +727,17 @@ class TestMissingMetadataUpdater(unittest.TestCase):
         with patch.object(updater.tmdb, "_request_json", return_value={"movie_results": [{"id": 348}]}):
             self.assertEqual(updater.tmdb.resolve_tmdb_id_from_imdb("tt0078748", "movie"), "348")
 
+        # Verify TMDB safe rate limiter (47 req/s = 50 - 5%)
+        from lib.tmdbhelper_client import RateLimiter, TMDB_SAFE_RPS
+        self.assertEqual(TMDB_SAFE_RPS, 47)
+        import time
+        rl = RateLimiter(max_requests=3, window_seconds=0.15)
+        t0 = time.monotonic()
+        for _ in range(4):
+            rl.acquire()
+        elapsed = time.monotonic() - t0
+        self.assertGreaterEqual(elapsed, 0.10)
+
 
 if __name__ == "__main__":
     unittest.main()

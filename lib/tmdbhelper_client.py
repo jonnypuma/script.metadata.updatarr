@@ -9,6 +9,7 @@ import os
 import sys
 import threading
 import time
+from collections import deque
 import urllib.request
 import urllib.parse
 import urllib.error
@@ -16,16 +17,43 @@ from lib.kodi_compat import translate_path, log
 
 
 TMDB_IMG_BASE = "https://image.tmdb.org/t/p/original"
+# TMDB official limit: ~50 req/s -> 50 * 0.95 = 47.5 -> 47 req/s (-5% safety margin)
+TMDB_SAFE_RPS = 47
+
+
+class RateLimiter:
+    """Thread-safe rolling-window rate limiter."""
+
+    def __init__(self, max_requests=TMDB_SAFE_RPS, window_seconds=1.0):
+        self.max_requests = max(1, int(max_requests))
+        self.window_seconds = float(window_seconds)
+        self._timestamps = deque()
+        self._lock = threading.Lock()
+
+    def acquire(self):
+        while True:
+            with self._lock:
+                now = time.monotonic()
+                cutoff = now - self.window_seconds
+                while self._timestamps and self._timestamps[0] <= cutoff:
+                    self._timestamps.popleft()
+                if len(self._timestamps) < self.max_requests:
+                    self._timestamps.append(now)
+                    return
+                sleep_for = (self._timestamps[0] + self.window_seconds) - now
+            if sleep_for > 0:
+                time.sleep(min(sleep_for, self.window_seconds))
 
 
 class TMDbFallbackClient:
-    def __init__(self, api_key="", language="en-US"):
+    def __init__(self, api_key="", language="en-US", max_rps=TMDB_SAFE_RPS):
         self.api_key = (api_key or "").strip()
         self.language = (language or "en-US").strip()
         self._tmdbhelper_api = None
         self._tmdbhelper_checked = False
         self._cache = {}
         self._lock = threading.Lock()
+        self._rate_limiter = RateLimiter(max_requests=max_rps, window_seconds=1.0)
 
     def _init_tmdbhelper(self):
         with self._lock:
@@ -64,15 +92,22 @@ class TMDbFallbackClient:
                 urllib.parse.quote(self.api_key),
                 urllib.parse.quote(self.language)
             )
-            for attempt in range(2):
+            for attempt in range(3):
                 try:
+                    self._rate_limiter.acquire()
                     req = urllib.request.Request(url, headers={"Accept": "application/json"})
                     with urllib.request.urlopen(req, timeout=10) as resp:
                         data_result = json.loads(resp.read().decode("utf-8"))
                         break
                 except urllib.error.HTTPError as e:
-                    if e.code == 429 and attempt == 0:
-                        time.sleep(1.5)
+                    if e.code == 429 and attempt < 2:
+                        retry_after = e.headers.get("Retry-After") if e.headers else None
+                        try:
+                            delay = float(retry_after) if retry_after else (1.5 * (2 ** attempt))
+                        except ValueError:
+                            delay = 1.5 * (2 ** attempt)
+                        log("TMDB rate limited (429), retrying in {:.1f}s...".format(delay), "debug")
+                        time.sleep(min(delay, 10.0))
                         continue
                     log("TMDB HTTP {} for {}: {}".format(e.code, endpoint, e.reason), "debug")
                     break
@@ -84,6 +119,7 @@ class TMDbFallbackClient:
             tmdb_helper = self._init_tmdbhelper()
             if tmdb_helper is not None:
                 try:
+                    self._rate_limiter.acquire()
                     base_ep, _, qs = endpoint.lstrip("/").partition("?")
                     kwargs = {"language": self.language}
                     if qs:

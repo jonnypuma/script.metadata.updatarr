@@ -19,5 +19,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Added per-scope selection (**Seasons Only**, **Movies Only**, **TV Shows Only**, **Episodes Only**, **All Incremental**, **All Full Rescan**).
   - Added per-folder `list_dir` NFO caching, incremental `metadata_scan_state.json`, thread-safety locks in `MetadataUpdater` and `TMDbFallbackClient`, IMDB-to-TMDB `/find` fallback resolution, and preloaded link caches (`genre_link`, `studio_link`, `actor_link`).
 - **Full Table Backup Coverage (`lib/backup_manager.py`):** MariaDB/MySQL backups snapshot and restore all touched metadata tables (`videoversion`, `videoversiontype`, `seasons`, `movie`, `tvshow`, `episode`, `streamdetails`).
+- **TMDB Rate Limiting (`lib/tmdbhelper_client.py`):** Added a thread-safe rolling-window `RateLimiter` capped at **47 req/s** (`50 req/s - 5%` safety margin) across both direct TMDB API calls and TMDbHelper fallback, plus `Retry-After` / exponential backoff on `HTTP 429`.
 - **Custom Artwork:** Generated distinct 512x512 `icon.png` and 1920x1080 `fanart.jpg` for **Metadata Updatarr**.
 - **Combined Run & Service (`main.py`, `service.py`):** Added **Run All (Video Versions + Missing Metadata)** plus dedicated **Missing Metadata** scan & dry-run menu items and background service support.
