@@ -637,14 +637,16 @@ def run_missing_metadata_scan(dry_run=False):
         total_scanned, changes = updater.scan_missing_metadata(
             progress_callback=on_progress,
             include_seasons=True,
-            include_movies=getattr(settings, "update_missing_movie_plots", True)
+            include_movies=getattr(settings, "update_missing_movie_plots", True),
+            include_tvshows=getattr(settings, "update_missing_tv_metadata", True),
+            include_episodes=getattr(settings, "update_missing_tv_metadata", True)
         )
     finally:
         progress.close()
 
     if not changes:
         adapter.close()
-        show_ok_dialog("Missing Metadata", "No missing season plots or movie metadata found in {}!".format(db_label))
+        show_ok_dialog("Missing Metadata", "No missing metadata found in {}!".format(db_label))
         return
 
     preview_lines = [
@@ -655,12 +657,8 @@ def run_missing_metadata_scan(dry_run=False):
         ""
     ]
     for ch in changes:
-        field_list = ", ".join(
-            "{}: '{}'".format(k, (v[:75] + "..." if len(v) > 75 else v))
-            for k, v in ch.fields.items()
-        )
         preview_lines.append(u"• [{}] {} ({})\n  {}\n".format(
-            ch.target_table, ch.media_label, ch.source, field_list
+            ch.target_table, ch.media_label, ch.source, ch.summary_parts()
         ))
 
     if dry_run:

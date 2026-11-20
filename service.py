@@ -50,7 +50,9 @@ def run_silent_update():
         meta_updater = MetadataUpdater(adapter, settings)
         _, meta_changes = meta_updater.scan_missing_metadata(
             include_seasons=True,
-            include_movies=getattr(settings, "update_missing_movie_plots", True)
+            include_movies=getattr(settings, "update_missing_movie_plots", True),
+            include_tvshows=getattr(settings, "update_missing_tv_metadata", True),
+            include_episodes=getattr(settings, "update_missing_tv_metadata", True)
         )
         if meta_changes:
             meta_applied, _ = meta_updater.apply_metadata_changes(meta_changes)

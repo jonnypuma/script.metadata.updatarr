@@ -574,31 +574,63 @@ class TestMissingMetadataUpdater(unittest.TestCase):
         os.makedirs(self.show_dir, exist_ok=True)
         os.makedirs(self.movie_dir, exist_ok=True)
 
-        # Local tvshow.nfo + season01.nfo
+        # Local tvshow.nfo + season01.nfo + episode.nfo
         with open(os.path.join(self.show_dir, "tvshow.nfo"), "w", encoding="utf-8") as f:
-            f.write('<tvshow><title>Penny Dreadful</title><namedseason number="1">Origin</namedseason></tvshow>')
+            f.write(
+                '<tvshow><title>Penny Dreadful</title><plot>Dark Victorian tale.</plot>'
+                '<mpaa>US:TV-MA</mpaa><genre>Drama</genre><genre>Horror</genre>'
+                '<studio>Showtime</studio><actor><name>Eva Green</name><role>Vanessa Ives</role></actor>'
+                '<namedseason number="1">Origin</namedseason></tvshow>'
+            )
         with open(os.path.join(self.show_dir, "season01.nfo"), "w", encoding="utf-8") as f:
             f.write("<season><plot>Victorian London horrors unfold.</plot></season>")
+        with open(os.path.join(self.show_dir, "Penny.Dreadful.S01E01.nfo"), "w", encoding="utf-8") as f:
+            f.write(
+                "<episodedetails><plot>Night Work begins.</plot><runtime>55</runtime>"
+                "<fileinfo><streamdetails><video><codec>hevc</codec><width>1920</width><height>1080</height><durationinseconds>3300</durationinseconds></video>"
+                "<audio><codec>eac3</codec><channels>6</channels><language>eng</language></audio></streamdetails></fileinfo>"
+                "</episodedetails>"
+            )
 
-        # Local movie.nfo with plot + tagline
+        # Local movie.nfo with full metadata + streamdetails
         with open(os.path.join(self.movie_dir, "movie.nfo"), "w", encoding="utf-8") as f:
-            f.write("<movie><plot>In space no one can hear you scream.</plot><tagline>The eighth passenger.</tagline></movie>")
+            f.write(
+                "<movie><plot>In space no one can hear you scream.</plot><tagline>The eighth passenger.</tagline>"
+                "<mpaa>Rated R</mpaa><runtime>117</runtime><genre>Sci-Fi</genre><genre>Horror</genre>"
+                "<studio>20th Century Fox</studio><actor><name>Sigourney Weaver</name><role>Ripley</role></actor>"
+                "<fileinfo><streamdetails><video><codec>hevc</codec><width>3840</width><height>2160</height><hdrtype>dolbyvision</hdrtype><durationinseconds>7020</durationinseconds></video>"
+                "<audio><codec>truehd</codec><channels>8</channels><language>eng</language></audio>"
+                "<subtitle><language>eng</language></subtitle></streamdetails></fileinfo>"
+                "</movie>"
+            )
 
         conn = sqlite3.connect(self.db_path)
         cur = conn.cursor()
         cur.execute("CREATE TABLE path (idPath INT PRIMARY KEY, strPath TEXT);")
         cur.execute("CREATE TABLE files (idFile INT PRIMARY KEY, idPath INT, strFilename TEXT, playCount INT, lastPlayed TEXT);")
-        cur.execute("CREATE TABLE movie (idMovie INT PRIMARY KEY, idFile INT, c00 TEXT, c01 TEXT, c03 TEXT);")
-        cur.execute("CREATE TABLE tvshow (idShow INT PRIMARY KEY, c00 TEXT);")
+        cur.execute("CREATE TABLE movie (idMovie INT PRIMARY KEY, idFile INT, c00 TEXT, c01 TEXT, c03 TEXT, c11 TEXT, c12 TEXT, c14 TEXT, c18 TEXT);")
+        cur.execute("CREATE TABLE tvshow (idShow INT PRIMARY KEY, c00 TEXT, c01 TEXT, c08 TEXT, c13 TEXT, c14 TEXT);")
+        cur.execute("CREATE TABLE episode (idEpisode INT PRIMARY KEY, idFile INT, idShow INT, c00 TEXT, c01 TEXT, c09 TEXT, c12 TEXT, c13 TEXT);")
         cur.execute("CREATE TABLE tvshowlinkpath (idShow INT, idPath INT);")
         cur.execute("CREATE TABLE seasons (idSeason INT PRIMARY KEY, idShow INT, season INT, name TEXT, userrating INT, plot TEXT);")
         cur.execute("CREATE TABLE uniqueid (uniqueid_id INT PRIMARY KEY, media_id INT, media_type TEXT, value TEXT, type TEXT);")
+        cur.execute("CREATE TABLE genre (genre_id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT);")
+        cur.execute("CREATE TABLE genre_link (genre_id INT, media_id INT, media_type TEXT);")
+        cur.execute("CREATE TABLE studio (studio_id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT);")
+        cur.execute("CREATE TABLE studio_link (studio_id INT, media_id INT, media_type TEXT);")
+        cur.execute("CREATE TABLE actor (actor_id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, art_urls TEXT);")
+        cur.execute("CREATE TABLE actor_link (actor_id INT, media_id INT, media_type TEXT, role TEXT, cast_order INT);")
+        cur.execute(
+            "CREATE TABLE streamdetails (idFile INT, iStreamType INT, strVideoCodec TEXT, fVideoAspect REAL, "
+            "iVideoWidth INT, iVideoHeight INT, strAudioCodec TEXT, iAudioChannels INT, strAudioLanguage TEXT, "
+            "strSubtitleLanguage TEXT, iVideoDuration INT, strStereoMode TEXT, strVideoLanguage TEXT, strHdrType TEXT);"
+        )
         cur.execute("CREATE TABLE videoversion (idFile INT PRIMARY KEY, idMedia INT, media_type TEXT, itemType INT, idType INT);")
         cur.execute("CREATE TABLE videoversiontype (id INT PRIMARY KEY, name TEXT, owner INT, itemType INT);")
 
         cur.execute("INSERT INTO path VALUES (1, ?);", (self.show_dir + os.sep,))
         cur.execute("INSERT INTO path VALUES (2, ?);", (self.movie_dir + os.sep,))
-        cur.execute("INSERT INTO tvshow VALUES (1, 'Penny Dreadful');")
+        cur.execute("INSERT INTO tvshow VALUES (1, 'Penny Dreadful', '', '', '', '');")
         cur.execute("INSERT INTO tvshowlinkpath VALUES (1, 1);")
         cur.execute("INSERT INTO uniqueid VALUES (1, 1, 'tvshow', '54671', 'tmdb');")
 
@@ -606,9 +638,13 @@ class TestMissingMetadataUpdater(unittest.TestCase):
         cur.execute("INSERT INTO seasons VALUES (10, 1, 1, 'Season 1', 0, NULL);")
         cur.execute("INSERT INTO seasons VALUES (11, 1, 2, '', 0, '');")
 
-        # Movie with missing plot and tagline
+        # Episode 1 missing plot/runtime/streamdetails
+        cur.execute("INSERT INTO files VALUES (99, 1, 'Penny.Dreadful.S01E01.mkv', 0, NULL);")
+        cur.execute("INSERT INTO episode VALUES (20, 99, 1, 'Night Work', '', '0', '1', '1');")
+
+        # Movie missing all fields + streamdetails
         cur.execute("INSERT INTO files VALUES (100, 2, 'Alien.1979.mkv', 0, NULL);")
-        cur.execute("INSERT INTO movie VALUES (50, 100, 'Alien', '', NULL);")
+        cur.execute("INSERT INTO movie VALUES (50, 100, 'Alien', '', NULL, '', '', '', '');")
 
         conn.commit()
         conn.close()
@@ -633,6 +669,8 @@ class TestMissingMetadataUpdater(unittest.TestCase):
         settings.only_missing_season_plots = True
         settings.update_season_names = True
         settings.update_missing_movie_plots = True
+        settings.update_missing_tv_metadata = True
+        settings.update_missing_streamdetails = True
 
         updater = MetadataUpdater(self.adapter, settings)
         with patch.object(updater.tmdb, "is_available", return_value=True), \
@@ -640,12 +678,14 @@ class TestMissingMetadataUpdater(unittest.TestCase):
                  "name": "Season 2: Witches",
                  "plot": "Evelyn Poole targets Vanessa."
              }):
-            total, changes = updater.scan_missing_metadata(include_seasons=True, include_movies=True)
-            self.assertEqual(total, 3)
-            self.assertEqual(len(changes), 3)
+            total, changes = updater.scan_missing_metadata(
+                include_seasons=True, include_movies=True, include_tvshows=True, include_episodes=True
+            )
+            self.assertEqual(total, 5)
+            self.assertEqual(len(changes), 5)
 
             applied, _ = updater.apply_metadata_changes(changes)
-            self.assertEqual(applied, 3)
+            self.assertEqual(applied, 5)
 
         s1 = self.adapter.query("SELECT name, plot FROM seasons WHERE idSeason = 10")[0]
         self.assertEqual(s1["name"], "Origin")
@@ -655,9 +695,30 @@ class TestMissingMetadataUpdater(unittest.TestCase):
         self.assertEqual(s2["name"], "Season 2: Witches")
         self.assertEqual(s2["plot"], "Evelyn Poole targets Vanessa.")
 
-        mov = self.adapter.query("SELECT c01, c03 FROM movie WHERE idMovie = 50")[0]
+        mov = self.adapter.query("SELECT c01, c03, c11, c12, c14, c18 FROM movie WHERE idMovie = 50")[0]
         self.assertEqual(mov["c01"], "In space no one can hear you scream.")
         self.assertEqual(mov["c03"], "The eighth passenger.")
+        self.assertEqual(mov["c11"], "7020")
+        self.assertEqual(mov["c12"], "Rated R")
+        self.assertEqual(mov["c14"], "Sci-Fi / Horror")
+        self.assertEqual(mov["c18"], "20th Century Fox")
+
+        tv = self.adapter.query("SELECT c01, c08, c13, c14 FROM tvshow WHERE idShow = 1")[0]
+        self.assertEqual(tv["c01"], "Dark Victorian tale.")
+        self.assertEqual(tv["c08"], "Drama / Horror")
+        self.assertEqual(tv["c13"], "US:TV-MA")
+        self.assertEqual(tv["c14"], "Showtime")
+
+        ep = self.adapter.query("SELECT c01, c09 FROM episode WHERE idEpisode = 20")[0]
+        self.assertEqual(ep["c01"], "Night Work begins.")
+        self.assertEqual(ep["c09"], "3300")
+
+        mov_sd = self.adapter.query("SELECT * FROM streamdetails WHERE idFile = 100")
+        self.assertEqual(len(mov_sd), 3)  # video + audio + subtitle
+        ep_sd = self.adapter.query("SELECT * FROM streamdetails WHERE idFile = 99")
+        self.assertEqual(len(ep_sd), 2)   # video + audio
+        mov_cast = self.adapter.query("SELECT * FROM actor_link WHERE media_id = 50 AND media_type = 'movie'")
+        self.assertEqual(len(mov_cast), 1)
 
 
 if __name__ == "__main__":

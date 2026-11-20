@@ -82,6 +82,16 @@
           <default>true</default>
           <control type="toggle"/>
         </setting>
+        <setting id="update_missing_tv_metadata" type="boolean" label="32089">
+          <level>0</level>
+          <default>true</default>
+          <control type="toggle"/>
+        </setting>
+        <setting id="update_missing_streamdetails" type="boolean" label="32090">
+          <level>0</level>
+          <default>true</default>
+          <control type="toggle"/>
+        </setting>
         <setting id="tmdb_language" type="string" label="32087">
           <level>0</level>
           <default>en-US</default>

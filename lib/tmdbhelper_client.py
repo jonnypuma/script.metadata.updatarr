@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-Client for fetching fallback metadata (season plots/names, movie/show/episode plots & taglines)
-via installed plugin.video.themoviedb.helper (TMDbHelper) or a user-configured TMDB API key.
+Client for fetching fallback metadata (season plots/names, movie/show/episode plots,
+taglines, MPAA, runtime, genres, studios, cast) via installed
+plugin.video.themoviedb.helper (TMDbHelper) or an optional TMDB API key.
 """
 import json
 import os
@@ -11,6 +12,9 @@ import urllib.request
 import urllib.parse
 import urllib.error
 from lib.kodi_compat import translate_path, log
+
+
+TMDB_IMG_BASE = "https://image.tmdb.org/t/p/original"
 
 
 class TMDbFallbackClient:
@@ -47,7 +51,6 @@ class TMDbFallbackClient:
         if endpoint in self._cache:
             return self._cache[endpoint]
 
-        # 1. Try user-configured TMDB API key first if explicitly set
         if self.api_key:
             sep = "&" if "?" in endpoint else "?"
             url = "https://api.themoviedb.org/3/{}{}api_key={}&language={}".format(
@@ -73,11 +76,16 @@ class TMDbFallbackClient:
                     log("TMDB request failed for {}: {}".format(endpoint, e), "debug")
                     break
 
-        # 2. Fallback to installed plugin.video.themoviedb.helper
         tmdb_helper = self._init_tmdbhelper()
         if tmdb_helper is not None:
             try:
-                data = tmdb_helper.get_request_sc(endpoint.lstrip("/"), language=self.language)
+                base_ep, _, qs = endpoint.lstrip("/").partition("?")
+                kwargs = {"language": self.language}
+                if qs:
+                    for k, vals in urllib.parse.parse_qs(qs).items():
+                        if vals:
+                            kwargs[k] = vals[0]
+                data = tmdb_helper.get_request_sc(base_ep, **kwargs)
                 if isinstance(data, dict):
                     self._cache[endpoint] = data
                     return data
@@ -86,6 +94,40 @@ class TMDbFallbackClient:
 
         self._cache[endpoint] = None
         return None
+
+    def _extract_cast(self, credits_dict, limit=15):
+        cast_list = []
+        for idx, c in enumerate((credits_dict or {}).get("cast") or []):
+            name = (c.get("name") or "").strip()
+            if not name:
+                continue
+            thumb = (TMDB_IMG_BASE + c["profile_path"]) if c.get("profile_path") else ""
+            cast_list.append({
+                "name": name,
+                "role": (c.get("character") or "").strip(),
+                "order": c.get("order") if c.get("order") is not None else idx,
+                "thumb": thumb,
+            })
+            if len(cast_list) >= limit:
+                break
+        return cast_list
+
+    def _extract_movie_mpaa(self, data):
+        for entry in (data.get("release_dates") or {}).get("results") or []:
+            if entry.get("iso_3166_1") == "US":
+                for rd in entry.get("release_dates") or []:
+                    cert = (rd.get("certification") or "").strip()
+                    if cert:
+                        return "Rated " + cert if not cert.lower().startswith("rated") else cert
+        return ""
+
+    def _extract_tv_mpaa(self, data):
+        for entry in (data.get("content_ratings") or {}).get("results") or []:
+            if entry.get("iso_3166_1") == "US":
+                rating = (entry.get("rating") or "").strip()
+                if rating:
+                    return "US:" + rating if not rating.startswith("US:") else rating
+        return ""
 
     def get_season_details(self, tmdb_id, season_num):
         if not tmdb_id or season_num is None:
@@ -101,23 +143,38 @@ class TMDbFallbackClient:
     def get_movie_details(self, tmdb_id):
         if not tmdb_id:
             return None
-        data = self._request_json("movie/{}".format(tmdb_id))
+        data = self._request_json("movie/{}?append_to_response=credits,release_dates".format(tmdb_id))
         if not isinstance(data, dict):
             return None
+        runtime_min = data.get("runtime") or 0
+        genres = [g["name"].strip() for g in (data.get("genres") or []) if g.get("name")]
+        studios = [p["name"].strip() for p in (data.get("production_companies") or []) if p.get("name")]
         return {
             "plot": (data.get("overview") or "").strip(),
             "tagline": (data.get("tagline") or "").strip(),
+            "runtime_sec": str(int(runtime_min) * 60) if runtime_min else "",
+            "mpaa": self._extract_movie_mpaa(data),
+            "genres": genres,
+            "studios": studios,
+            "cast": self._extract_cast(data.get("credits")),
         }
 
     def get_tvshow_details(self, tmdb_id):
         if not tmdb_id:
             return None
-        data = self._request_json("tv/{}".format(tmdb_id))
+        data = self._request_json("tv/{}?append_to_response=credits,content_ratings".format(tmdb_id))
         if not isinstance(data, dict):
             return None
+        genres = [g["name"].strip() for g in (data.get("genres") or []) if g.get("name")]
+        studios = [n["name"].strip() for n in (data.get("networks") or []) if n.get("name")]
+        if not studios:
+            studios = [p["name"].strip() for p in (data.get("production_companies") or []) if p.get("name")]
         return {
             "plot": (data.get("overview") or "").strip(),
-            "tagline": (data.get("tagline") or "").strip(),
+            "mpaa": self._extract_tv_mpaa(data),
+            "genres": genres,
+            "studios": studios,
+            "cast": self._extract_cast(data.get("credits")),
         }
 
     def get_episode_details(self, show_tmdb_id, season_num, episode_num):
@@ -128,6 +185,9 @@ class TMDbFallbackClient:
         )
         if not isinstance(data, dict):
             return None
+        runtime_min = data.get("runtime") or 0
         return {
             "plot": (data.get("overview") or "").strip(),
+            "runtime_sec": str(int(runtime_min) * 60) if runtime_min else "",
+            "cast": self._extract_cast({"cast": data.get("guest_stars") or []}, limit=10),
         }

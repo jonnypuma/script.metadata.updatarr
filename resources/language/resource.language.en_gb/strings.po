@@ -263,3 +263,11 @@ msgstr ""
 msgctxt "#32088"
 msgid "Optional TMDB API key (blank = use TMDbHelper)"
 msgstr ""
+
+msgctxt "#32089"
+msgid "Also fill missing TV show & episode metadata"
+msgstr ""
+
+msgctxt "#32090"
+msgid "Fill missing media info (streamdetails from .nfo)"
+msgstr ""

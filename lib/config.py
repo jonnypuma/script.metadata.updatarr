@@ -82,6 +82,8 @@ class AddonSettings:
             self.update_season_names = _get_bool(addon, "update_season_names", True)
             self.include_specials = _get_bool(addon, "include_specials", False)
             self.update_missing_movie_plots = _get_bool(addon, "update_missing_movie_plots", True)
+            self.update_missing_tv_metadata = _get_bool(addon, "update_missing_tv_metadata", True)
+            self.update_missing_streamdetails = _get_bool(addon, "update_missing_streamdetails", True)
 
             # Schedule settings
             self.schedule_enabled = _get_bool(addon, "schedule_enabled", False)
@@ -120,6 +122,8 @@ class AddonSettings:
             self.update_season_names = True
             self.include_specials = False
             self.update_missing_movie_plots = True
+            self.update_missing_tv_metadata = True
+            self.update_missing_streamdetails = True
             self.schedule_enabled = False
             self.schedule_interval = 24
             self.run_on_scan = True
