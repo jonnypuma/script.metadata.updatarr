@@ -79,6 +79,17 @@ class SQLiteAdapter(BaseDatabaseAdapter):
         finally:
             cursor.close()
 
+    def executemany(self, sql, params_list):
+        if not params_list:
+            return 0
+        sql = self._convert_sql(sql)
+        cursor = self.conn.cursor()
+        try:
+            cursor.executemany(sql, params_list)
+            return cursor.rowcount
+        finally:
+            cursor.close()
+
     def commit(self):
         if self.conn:
             self.conn.commit()
@@ -262,6 +273,17 @@ class MySQLAdapter(BaseDatabaseAdapter):
             else:
                 cursor.execute(sql)
             return cursor.lastrowid
+        finally:
+            cursor.close()
+
+    def executemany(self, sql, params_list):
+        if not params_list:
+            return 0
+        sql = self._convert_sql(sql)
+        cursor = self.conn.cursor()
+        try:
+            cursor.executemany(sql, params_list)
+            return cursor.rowcount
         finally:
             cursor.close()
 

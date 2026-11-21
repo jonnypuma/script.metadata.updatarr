@@ -20,6 +20,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from lib.kodi_compat import log, file_exists, read_text_file, list_dir, translate_path, make_dirs
 from lib.backup_manager import BackupManager
 from lib.tmdbhelper_client import TMDbFallbackClient
+from lib.omdb_client import OMDbFallbackClient
 
 
 class MetadataChange:
@@ -225,6 +226,7 @@ class MetadataUpdater:
             api_key=getattr(settings, "tmdb_api_key", ""),
             language=getattr(settings, "tmdb_language", "en-US")
         )
+        self.omdb = OMDbFallbackClient(api_key=getattr(settings, "omdb_api_key", ""))
         self._tvshow_nfo_cache = {}
         self._folder_nfo_cache = {}
         self._cache_lock = threading.Lock()
@@ -602,6 +604,37 @@ class MetadataUpdater:
                 if added_tmdb:
                     sources.append("TMDbHelper")
 
+        # 3. OMDb tertiary fallback (capped at 950/day)
+        still_needs_omdb = (
+            (need_plot and "c01" not in fields)
+            or (need_runtime and "c11" not in fields)
+            or (need_mpaa and "c12" not in fields)
+            or (need_genres and not genres)
+            or (need_cast and not cast)
+        )
+        if still_needs_omdb and getattr(self.settings, "omdb_fallback_enabled", True) and self.omdb.is_available():
+            od = self.omdb.get_by_imdb(row.get("imdb_id")) or self.omdb.get_by_title(row.get("title"), "movie")
+            if od:
+                added_omdb = False
+                if need_plot and "c01" not in fields and od.get("plot"):
+                    fields["c01"] = od["plot"]
+                    added_omdb = True
+                if need_runtime and "c11" not in fields and od.get("runtime_sec"):
+                    fields["c11"] = od["runtime_sec"]
+                    added_omdb = True
+                if need_mpaa and "c12" not in fields and od.get("mpaa"):
+                    fields["c12"] = od["mpaa"]
+                    added_omdb = True
+                if need_genres and not genres and od.get("genres"):
+                    genres = od["genres"]
+                    fields["c14"] = " / ".join(genres)
+                    added_omdb = True
+                if need_cast and not cast and od.get("cast"):
+                    cast = od["cast"]
+                    added_omdb = True
+                if added_omdb:
+                    sources.append("OMDb")
+
         if not (fields or genres or studios or cast or streams):
             return None
 
@@ -947,6 +980,13 @@ class MetadataUpdater:
 
         applied = 0
         total = len(changes)
+        genre_link_batch = []
+        studio_link_batch = []
+        actor_link_batch = []
+        sd_video_batch = []
+        sd_audio_batch = []
+        sd_sub_batch = []
+
         try:
             for idx, ch in enumerate(changes):
                 if progress_callback and idx % 10 == 0:
@@ -971,10 +1011,7 @@ class MetadataUpdater:
                             genre_cache[gk] = gid
                         lkey = (gid, ch.id_val, ch.media_type)
                         if lkey not in existing_genre_links:
-                            self.adapter.execute(
-                                "INSERT INTO genre_link (genre_id, media_id, media_type) VALUES (%s, %s, %s)",
-                                lkey
-                            )
+                            genre_link_batch.append(lkey)
                             existing_genre_links.add(lkey)
 
                 if ch.studios and "studio" in tables and "studio_link" in tables:
@@ -986,10 +1023,7 @@ class MetadataUpdater:
                             studio_cache[sk] = sid
                         lkey = (sid, ch.id_val, ch.media_type)
                         if lkey not in existing_studio_links:
-                            self.adapter.execute(
-                                "INSERT INTO studio_link (studio_id, media_id, media_type) VALUES (%s, %s, %s)",
-                                lkey
-                            )
+                            studio_link_batch.append(lkey)
                             existing_studio_links.add(lkey)
 
                 if ch.cast and "actor" in tables and "actor_link" in tables:
@@ -1006,54 +1040,74 @@ class MetadataUpdater:
                             actor_cache[ak] = aid
                         lkey = (aid, ch.id_val, ch.media_type)
                         if lkey not in existing_actor_links:
-                            self.adapter.execute(
-                                "INSERT INTO actor_link (actor_id, media_id, media_type, role, cast_order) VALUES (%s, %s, %s, %s, %s)",
-                                (aid, ch.id_val, ch.media_type, act.get("role", ""), act.get("order", 0))
-                            )
+                            actor_link_batch.append((
+                                aid, ch.id_val, ch.media_type, act.get("role", ""), act.get("order", 0)
+                            ))
                             existing_actor_links.add(lkey)
 
                 if ch.streams and ch.id_file and "streamdetails" in tables:
                     for st in ch.streams:
                         st_type = st["iStreamType"]
                         if st_type == 0:
-                            self.adapter.execute(
-                                """INSERT INTO streamdetails
-                                   (idFile, iStreamType, strVideoCodec, fVideoAspect, iVideoWidth, iVideoHeight,
-                                    iVideoDuration, strStereoMode, strVideoLanguage, strHdrType)
-                                   VALUES (%s, 0, %s, %s, %s, %s, %s, %s, %s, %s)""",
-                                (
-                                    ch.id_file,
-                                    st.get("strVideoCodec", ""),
-                                    st.get("fVideoAspect", 0.0),
-                                    st.get("iVideoWidth", 0),
-                                    st.get("iVideoHeight", 0),
-                                    st.get("iVideoDuration", 0),
-                                    st.get("strStereoMode", ""),
-                                    st.get("strVideoLanguage", ""),
-                                    st.get("strHdrType", ""),
-                                )
-                            )
+                            sd_video_batch.append((
+                                ch.id_file,
+                                st.get("strVideoCodec", ""),
+                                st.get("fVideoAspect", 0.0),
+                                st.get("iVideoWidth", 0),
+                                st.get("iVideoHeight", 0),
+                                st.get("iVideoDuration", 0),
+                                st.get("strStereoMode", ""),
+                                st.get("strVideoLanguage", ""),
+                                st.get("strHdrType", ""),
+                            ))
                         elif st_type == 1:
-                            self.adapter.execute(
-                                """INSERT INTO streamdetails
-                                   (idFile, iStreamType, strAudioCodec, iAudioChannels, strAudioLanguage)
-                                   VALUES (%s, 1, %s, %s, %s)""",
-                                (
-                                    ch.id_file,
-                                    st.get("strAudioCodec", ""),
-                                    st.get("iAudioChannels", 0),
-                                    st.get("strAudioLanguage", ""),
-                                )
-                            )
+                            sd_audio_batch.append((
+                                ch.id_file,
+                                st.get("strAudioCodec", ""),
+                                st.get("iAudioChannels", 0),
+                                st.get("strAudioLanguage", ""),
+                            ))
                         elif st_type == 2:
-                            self.adapter.execute(
-                                """INSERT INTO streamdetails
-                                   (idFile, iStreamType, strSubtitleLanguage)
-                                   VALUES (%s, 2, %s)""",
-                                (ch.id_file, st.get("strSubtitleLanguage", ""))
-                            )
+                            sd_sub_batch.append((ch.id_file, st.get("strSubtitleLanguage", "")))
 
                 applied += 1
+
+            # Flush batched link & streamdetails inserts
+            if genre_link_batch:
+                self.adapter.executemany(
+                    "INSERT INTO genre_link (genre_id, media_id, media_type) VALUES (%s, %s, %s)",
+                    genre_link_batch
+                )
+            if studio_link_batch:
+                self.adapter.executemany(
+                    "INSERT INTO studio_link (studio_id, media_id, media_type) VALUES (%s, %s, %s)",
+                    studio_link_batch
+                )
+            if actor_link_batch:
+                self.adapter.executemany(
+                    "INSERT INTO actor_link (actor_id, media_id, media_type, role, cast_order) VALUES (%s, %s, %s, %s, %s)",
+                    actor_link_batch
+                )
+            if sd_video_batch:
+                self.adapter.executemany(
+                    """INSERT INTO streamdetails
+                       (idFile, iStreamType, strVideoCodec, fVideoAspect, iVideoWidth, iVideoHeight,
+                        iVideoDuration, strStereoMode, strVideoLanguage, strHdrType)
+                       VALUES (%s, 0, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                    sd_video_batch
+                )
+            if sd_audio_batch:
+                self.adapter.executemany(
+                    """INSERT INTO streamdetails
+                       (idFile, iStreamType, strAudioCodec, iAudioChannels, strAudioLanguage)
+                       VALUES (%s, 1, %s, %s, %s)""",
+                    sd_audio_batch
+                )
+            if sd_sub_batch:
+                self.adapter.executemany(
+                    "INSERT INTO streamdetails (idFile, iStreamType, strSubtitleLanguage) VALUES (%s, 2, %s)",
+                    sd_sub_batch
+                )
 
             self.adapter.commit()
             log("Applied {} missing metadata updates.".format(applied))

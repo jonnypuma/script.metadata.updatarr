@@ -738,6 +738,19 @@ class TestMissingMetadataUpdater(unittest.TestCase):
         elapsed = time.monotonic() - t0
         self.assertGreaterEqual(elapsed, 0.10)
 
+    def test_omdb_daily_quota_limit(self):
+        from lib.omdb_client import OMDbFallbackClient, OMDB_SAFE_DAILY_LIMIT
+        self.assertEqual(OMDB_SAFE_DAILY_LIMIT, 950)
+
+        with patch("lib.omdb_client.translate_path", return_value=os.path.join(self.temp_dir, "addon_data")):
+            client = OMDbFallbackClient(api_key="test_key", daily_limit=2)
+            self.assertEqual(client.get_remaining_daily_quota(), 2)
+            self.assertTrue(client._reserve_quota_slot())
+            self.assertTrue(client._reserve_quota_slot())
+            self.assertEqual(client.get_remaining_daily_quota(), 0)
+            # 3rd request on the same day must be blocked
+            self.assertFalse(client._reserve_quota_slot())
+
 
 if __name__ == "__main__":
     unittest.main()

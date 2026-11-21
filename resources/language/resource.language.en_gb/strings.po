@@ -271,3 +271,11 @@ msgstr ""
 msgctxt "#32090"
 msgid "Fill missing media info (streamdetails from .nfo)"
 msgstr ""
+
+msgctxt "#32091"
+msgid "Fallback to OMDb (capped at 950/day safe limit)"
+msgstr ""
+
+msgctxt "#32092"
+msgid "Optional OMDb API key (blank = read from TMDbHelper)"
+msgstr ""

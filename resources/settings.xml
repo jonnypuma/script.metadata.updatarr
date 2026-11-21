@@ -108,6 +108,19 @@
           </constraints>
           <control type="edit" format="string"/>
         </setting>
+        <setting id="omdb_fallback_enabled" type="boolean" label="32091">
+          <level>0</level>
+          <default>true</default>
+          <control type="toggle"/>
+        </setting>
+        <setting id="omdb_api_key" type="string" label="32092">
+          <level>0</level>
+          <default/>
+          <constraints>
+            <allowempty>true</allowempty>
+          </constraints>
+          <control type="edit" format="string"/>
+        </setting>
       </group>
     </category>
     <category id="schedule" label="32030">
