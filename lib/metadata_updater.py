@@ -68,7 +68,9 @@ class MetadataChange:
         for col, val in self.fields.items():
             label = self._friendly_col(col)
             sval = str(val).replace("\n", " ").strip()
-            if len(sval) > 80:
+            if label == "runtime" and sval.isdigit() and int(sval) > 0:
+                sval = "{} min ({}s)".format(int(sval) // 60, sval)
+            elif len(sval) > 80:
                 sval = sval[:77] + "..."
             parts.append(u"{}: '{}'".format(label, sval))
         if self.genres and "c14" not in self.fields and "c08" not in self.fields:
