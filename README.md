@@ -9,12 +9,15 @@
 
 ## Features
 
-### 1. Missing Metadata Recovery (Seasons & Movies)
-- **Season Plots & Names (`seasons.plot`, `seasons.name`):** Fills missing season overviews and generic/empty season titles.
-- **Missing Movie Plots & Taglines (`movie.c01`, `movie.c03`):** Populates missing movie summaries and taglines.
-- **Local NFO First, TMDbHelper Fallback:**
-  1. Checks local `seasonXX.nfo`, `tvshow.nfo` (`<namedseason>`, `<season>`), `<filename>.nfo`, and `movie.nfo`.
-  2. Falls back to **TMDbHelper** (`plugin.video.themoviedb.helper`) or an optional user-configured TMDB API key using Kodi's `uniqueid` `tmdb` ID.
+### 1. Missing Metadata & Media Info Recovery
+- **Seasons (`seasons.plot`, `seasons.name`):** Fills missing season overviews and empty/generic season names (with optional Specials toggle).
+- **Movies (`c01`–`c18`, links, `streamdetails`):** Fills missing plot, tagline, runtime, MPAA, genres (`genre_link`), studios (`studio_link`), cast (`actor_link`), and video/audio/subtitle `streamdetails`.
+- **TV Shows & Episodes:** Fills missing TV show plot, MPAA, genres, studios, and cast, plus episode plot, runtime, and `streamdetails`.
+- **Scope Picker & Incremental State:** Choose **Seasons Only**, **Movies Only**, **TV Shows Only**, **Episodes Only**, **All (Incremental)**, or **All (Full Rescan)** with per-folder `list_dir` NFO caching and `metadata_scan_state.json`.
+- **3-Tier Provider Fallback with Safe Rate Limits:**
+  1. **Local `.nfo` files** (`seasonXX.nfo`, `tvshow.nfo`, `<filename>.nfo`, `movie.nfo`)
+  2. **TMDbHelper / TMDB API** (using `tmdb` or IMDB `/find` lookup, capped at **47 req/s** = `50 - 5%` with `Retry-After` backoff)
+  3. **OMDb API** (optional tertiary fallback using `omdb_api_key` or TMDbHelper's key, capped at **950 req/day** = `1,000 - 5%` persisted in `omdb_quota.json`)
 
 ### 2. Video Versions Management
 - **Movies & TV Episodes:** Detects and assigns Video Versions from `<videoassettitle>`, `<edition>`, filename patterns, and `custom_mappings.json`.
@@ -27,7 +30,8 @@
 
 ### 3. Database, Backups & Logging
 - **Kodi-Version-Aware Database Detection & Switcher:** Auto-detects MariaDB/MySQL (`advancedsettings.xml`) or SQLite (`MyVideos*.db`), scopes to the running Kodi version's schema, and lets you switch target schemas from the menu.
-- **Guaranteed 3+ Backups & Restore:** Snapshots `videoversion`, `videoversiontype`, and `seasons` (or SQLite `.db`) before every write, retaining at least 3 backups.
+- **Guaranteed 3+ Backups & Restore:** Snapshots `videoversion`, `videoversiontype`, `seasons`, and touched metadata tables (`movie`, `tvshow`, `episode`, `streamdetails`) (or SQLite `.db`) before every write, retaining at least 3 backups.
+- **Batched DB Writes:** Uses `executemany()` for bulk `genre_link`, `studio_link`, `actor_link`, and `streamdetails` inserts.
 - **GUI Run Log Viewer & Background Service:** View `updatarr_*.log` reports inside Kodi and optionally run automatically after library scans or on a schedule.
 
 ---
