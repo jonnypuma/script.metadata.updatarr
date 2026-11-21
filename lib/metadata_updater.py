@@ -15,6 +15,7 @@ import re
 import html
 import json
 import threading
+import unicodedata
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from lib.kodi_compat import log, file_exists, read_text_file, list_dir, translate_path, make_dirs
@@ -96,6 +97,14 @@ def _clean_text(val):
         return ""
     text = html.unescape(val.strip())
     return re.sub(r"[ \t]+", " ", text).strip()
+
+
+def _norm_lookup_key(name):
+    """Fold diacritics/accents and case so 'Sinéad' matches MariaDB's accent-insensitive unique index."""
+    if not name:
+        return ""
+    nfkd = unicodedata.normalize("NFKD", name.strip())
+    return "".join(c for c in nfkd if not unicodedata.combining(c)).lower()
 
 
 def _safe_int(val, default=0):
@@ -972,7 +981,7 @@ class MetadataUpdater:
         if "genre" in tables and "genre_link" in tables:
             for r in self.adapter.query("SELECT genre_id, name FROM genre"):
                 if r.get("name"):
-                    genre_cache[r["name"].strip().lower()] = r["genre_id"]
+                    genre_cache[_norm_lookup_key(r["name"])] = r["genre_id"]
             if any(ch.genres for ch in changes):
                 for r in self.adapter.query("SELECT genre_id, media_id, media_type FROM genre_link"):
                     existing_genre_links.add((r["genre_id"], r["media_id"], r["media_type"]))
@@ -982,7 +991,7 @@ class MetadataUpdater:
         if "studio" in tables and "studio_link" in tables:
             for r in self.adapter.query("SELECT studio_id, name FROM studio"):
                 if r.get("name"):
-                    studio_cache[r["name"].strip().lower()] = r["studio_id"]
+                    studio_cache[_norm_lookup_key(r["name"])] = r["studio_id"]
             if any(ch.studios for ch in changes):
                 for r in self.adapter.query("SELECT studio_id, media_id, media_type FROM studio_link"):
                     existing_studio_links.add((r["studio_id"], r["media_id"], r["media_type"]))
@@ -992,10 +1001,29 @@ class MetadataUpdater:
         if "actor" in tables and "actor_link" in tables:
             for r in self.adapter.query("SELECT actor_id, name FROM actor"):
                 if r.get("name"):
-                    actor_cache[r["name"].strip().lower()] = r["actor_id"]
+                    actor_cache[_norm_lookup_key(r["name"])] = r["actor_id"]
             if any(ch.cast for ch in changes):
                 for r in self.adapter.query("SELECT actor_id, media_id, media_type FROM actor_link"):
                     existing_actor_links.add((r["actor_id"], r["media_id"], r["media_type"]))
+
+        def _get_or_insert_entity(cache, table, id_col, insert_sql, insert_params, name_val):
+            k = _norm_lookup_key(name_val)
+            eid = cache.get(k)
+            if eid:
+                return eid
+            try:
+                eid = self.adapter.execute(insert_sql, insert_params)
+            except Exception:
+                rows = self.adapter.query(
+                    "SELECT {} AS eid FROM {} WHERE name = %s LIMIT 1".format(id_col, table),
+                    (name_val,)
+                )
+                if rows:
+                    eid = rows[0]["eid"]
+                else:
+                    raise
+            cache[k] = eid
+            return eid
 
         applied = 0
         total = len(changes)
@@ -1023,11 +1051,10 @@ class MetadataUpdater:
 
                 if ch.genres and "genre" in tables and "genre_link" in tables:
                     for gname in ch.genres:
-                        gk = gname.lower()
-                        gid = genre_cache.get(gk)
-                        if not gid:
-                            gid = self.adapter.execute("INSERT INTO genre (name) VALUES (%s)", (gname,))
-                            genre_cache[gk] = gid
+                        gid = _get_or_insert_entity(
+                            genre_cache, "genre", "genre_id",
+                            "INSERT INTO genre (name) VALUES (%s)", (gname,), gname
+                        )
                         lkey = (gid, ch.id_val, ch.media_type)
                         if lkey not in existing_genre_links:
                             genre_link_batch.append(lkey)
@@ -1035,11 +1062,10 @@ class MetadataUpdater:
 
                 if ch.studios and "studio" in tables and "studio_link" in tables:
                     for sname in ch.studios:
-                        sk = sname.lower()
-                        sid = studio_cache.get(sk)
-                        if not sid:
-                            sid = self.adapter.execute("INSERT INTO studio (name) VALUES (%s)", (sname,))
-                            studio_cache[sk] = sid
+                        sid = _get_or_insert_entity(
+                            studio_cache, "studio", "studio_id",
+                            "INSERT INTO studio (name) VALUES (%s)", (sname,), sname
+                        )
                         lkey = (sid, ch.id_val, ch.media_type)
                         if lkey not in existing_studio_links:
                             studio_link_batch.append(lkey)
@@ -1048,15 +1074,11 @@ class MetadataUpdater:
                 if ch.cast and "actor" in tables and "actor_link" in tables:
                     for act in ch.cast:
                         aname = act["name"]
-                        ak = aname.lower()
-                        aid = actor_cache.get(ak)
-                        if not aid:
-                            art_xml = '<thumb>{}</thumb>'.format(act["thumb"]) if act.get("thumb") else ""
-                            aid = self.adapter.execute(
-                                "INSERT INTO actor (name, art_urls) VALUES (%s, %s)",
-                                (aname, art_xml)
-                            )
-                            actor_cache[ak] = aid
+                        art_xml = '<thumb>{}</thumb>'.format(act["thumb"]) if act.get("thumb") else ""
+                        aid = _get_or_insert_entity(
+                            actor_cache, "actor", "actor_id",
+                            "INSERT INTO actor (name, art_urls) VALUES (%s, %s)", (aname, art_xml), aname
+                        )
                         lkey = (aid, ch.id_val, ch.media_type)
                         if lkey not in existing_actor_links:
                             actor_link_batch.append((

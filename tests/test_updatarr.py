@@ -751,6 +751,29 @@ class TestMissingMetadataUpdater(unittest.TestCase):
             # 3rd request on the same day must be blocked
             self.assertFalse(client._reserve_quota_slot())
 
+    def test_accent_insensitive_actor_dedup(self):
+        from lib.metadata_updater import MetadataUpdater, MetadataChange
+        from lib.config import AddonSettings
+
+        # Pre-seed 'Sinead Matthews' without accent (simulating MariaDB utf8mb4 collation)
+        self.adapter.execute("INSERT INTO actor (name, art_urls) VALUES ('Sinead Matthews', '')")
+        self.adapter.commit()
+
+        updater = MetadataUpdater(self.adapter, AddonSettings())
+        ch = MetadataChange(
+            target_table="movie",
+            id_col="idMovie",
+            id_val=50,
+            media_label="Alien",
+            cast=[{"name": "Sinéad Matthews", "role": "Role", "order": 0, "thumb": ""}],
+            media_type="movie"
+        )
+        applied, _ = updater.apply_metadata_changes([ch])
+        self.assertEqual(applied, 1)
+
+        actors = self.adapter.query("SELECT * FROM actor WHERE name LIKE 'Sin%Matthews'")
+        self.assertEqual(len(actors), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

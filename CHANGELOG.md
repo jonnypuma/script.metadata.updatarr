@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.3] - 2026-11-21
+
+### Fixed
+- **Accent-Insensitive Actor/Genre/Studio Lookup (`lib/metadata_updater.py`):** Folded Unicode accents/diacritics in `actor_cache`, `genre_cache`, and `studio_cache` keys (`_norm_lookup_key`) and added duplicate-key fallback on `INSERT` so MariaDB's accent-insensitive unique indexes (`ix_actor_1`, etc., e.g. `Sinéad Matthews` vs `Sinead Matthews`) never fail with `1062 Duplicate entry`.
+
+---
+
 ## [0.1.2] - 2026-11-21
 
 ### Fixed
