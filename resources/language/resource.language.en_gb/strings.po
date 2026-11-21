@@ -279,3 +279,11 @@ msgstr ""
 msgctxt "#32092"
 msgid "Optional OMDb API key (blank = read from TMDbHelper)"
 msgstr ""
+
+msgctxt "#32093"
+msgid "Test database connection"
+msgstr ""
+
+msgctxt "#32094"
+msgid "Monthly (30 days)"
+msgstr ""

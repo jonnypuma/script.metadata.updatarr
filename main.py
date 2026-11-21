@@ -761,6 +761,40 @@ def run_all_updatarr():
     run_missing_metadata_scan(dry_run=False, scope="all", force_full=False)
 
 
+def run_test_db_connection():
+    settings = AddonSettings()
+    config = resolve_database_config(settings)
+    log("Testing DB connection: {}".format(config))
+    try:
+        adapter = get_adapter_for_config(config)
+        adapter.connect()
+        db_label = adapter.get_display_name()
+        tables = set(adapter.get_tables())
+        movie_cnt = adapter.query("SELECT COUNT(*) AS c FROM movie")[0]["c"] if "movie" in tables else 0
+        show_cnt = adapter.query("SELECT COUNT(*) AS c FROM tvshow")[0]["c"] if "tvshow" in tables else 0
+        season_cnt = adapter.query("SELECT COUNT(*) AS c FROM seasons WHERE season >= 0")[0]["c"] if "seasons" in tables else 0
+        ver_str = "SQLite"
+        if config.db_type == "mysql":
+            try:
+                vrow = adapter.query("SELECT VERSION() AS v")
+                ver_str = "MariaDB / MySQL {}".format(vrow[0]["v"]) if vrow else "MariaDB / MySQL"
+            except Exception:
+                ver_str = "MariaDB / MySQL"
+        adapter.close()
+        show_ok_dialog(
+            "Connection Successful",
+            "Connected to: {}\nEngine: {}\nMovies: {} | TV Shows: {} | Seasons: {}".format(
+                db_label, ver_str, movie_cnt, show_cnt, season_cnt
+            )
+        )
+    except Exception as e:
+        log("DB connection test failed: {}".format(e), "error")
+        show_ok_dialog(
+            "Connection Failed",
+            "Could not connect using current settings:\n{}\n\nTarget: {}".format(e, config)
+        )
+
+
 def open_settings():
     addon = get_addon()
     if addon:
@@ -808,6 +842,9 @@ def main():
         return
     elif "--restore" in args or "action=restore" in args:
         run_restore()
+        return
+    elif "--test-db" in args or "action=testdb" in args:
+        run_test_db_connection()
         return
 
     # Interactive GUI Menu

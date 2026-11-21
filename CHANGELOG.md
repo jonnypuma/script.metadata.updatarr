@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.4] - 2026-11-22
+
+### Added
+- **Test Database Connection Button (`resources/settings.xml`, `main.py`):** Added a **Test database connection** button (`action=testdb` / `--test-db`) under manual **Database** settings that verifies connectivity, server version, and movie/TV show/season counts.
+- **Monthly Schedule Option (`resources/settings.xml`):** Added **Monthly (30 days)** (`720` hours) to the background **Update frequency** options.
+
+---
+
 ## [0.1.3] - 2026-11-21
 
 ### Fixed

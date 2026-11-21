@@ -141,6 +141,7 @@
               <option label="32039">24</option>
               <option label="32040">72</option>
               <option label="32041">168</option>
+              <option label="32094">720</option>
             </options>
           </constraints>
           <dependencies>
@@ -270,6 +271,14 @@
           <control type="edit" format="string">
             <hidden>true</hidden>
           </control>
+        </setting>
+        <setting id="db_test_connection" type="action" label="32093">
+          <level>0</level>
+          <data>RunScript(script.metadata.updatarr, action=testdb)</data>
+          <dependencies>
+            <dependency type="enable" setting="db_auto_detect">false</dependency>
+          </dependencies>
+          <control type="button" format="action"/>
         </setting>
       </group>
     </category>
