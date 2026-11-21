@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.2] - 2026-11-21
+
+### Fixed
+- **Missing Metadata Preview Values (`lib/metadata_updater.py`):** `MetadataChange.summary_parts()` now displays human-readable field names and the actual detected values (e.g., `name: 'Season 1: Water'`, `plot: '...'`, `cast(12): ...`) in the Dry Run Preview and Summary modals instead of only bare column names.
+
+---
+
 ## [0.1.1] - 2026-11-21
 
 ### Added

@@ -54,14 +54,31 @@ class MetadataChange:
         )
         self.source = source
 
+    def _friendly_col(self, col):
+        if self.target_table == "movie":
+            return {"c01": "plot", "c03": "tagline", "c11": "runtime", "c12": "mpaa", "c14": "genres", "c18": "studios"}.get(col, col)
+        if self.target_table == "tvshow":
+            return {"c01": "plot", "c08": "genres", "c13": "mpaa", "c14": "studios"}.get(col, col)
+        if self.target_table == "episode":
+            return {"c01": "plot", "c09": "runtime"}.get(col, col)
+        return col
+
     def summary_parts(self):
-        parts = list(self.fields.keys())
-        if self.genres:
-            parts.append("genres({})".format(len(self.genres)))
-        if self.studios:
-            parts.append("studios({})".format(len(self.studios)))
+        parts = []
+        for col, val in self.fields.items():
+            label = self._friendly_col(col)
+            sval = str(val).replace("\n", " ").strip()
+            if len(sval) > 80:
+                sval = sval[:77] + "..."
+            parts.append(u"{}: '{}'".format(label, sval))
+        if self.genres and "c14" not in self.fields and "c08" not in self.fields:
+            parts.append(u"genres: '{}'".format(" / ".join(self.genres)))
+        if self.studios and "c18" not in self.fields and "c14" not in self.fields:
+            parts.append(u"studios: '{}'".format(" / ".join(self.studios)))
         if self.cast:
-            parts.append("cast({})".format(len(self.cast)))
+            names = ", ".join(c["name"] for c in self.cast[:3])
+            more = ", +{}".format(len(self.cast) - 3) if len(self.cast) > 3 else ""
+            parts.append(u"cast({}): {}{}".format(len(self.cast), names, more))
         if self.streams:
             parts.append("streamdetails({})".format(len(self.streams)))
         return ", ".join(parts)
